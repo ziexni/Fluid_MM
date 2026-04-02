@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
 
-from vlgraph_data_utils import data_partition, build_item_modality, Data
+from utils import data_partition, build_item_modality, Data
 from model import VLGraph, train_and_test  # 원본 model.py 그대로 사용
 
 
