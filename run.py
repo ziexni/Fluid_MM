@@ -17,7 +17,7 @@ from recbole.utils import (
     get_environment,
 )
 
-from Fluid_MM import Fliud_MMRec
+from Fluid_MM import Fluid_MMRec
 
 
 def load_item_features(item_path, title_npy_path, max_item_id):
