@@ -1,215 +1,259 @@
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from collections import defaultdict
 
 
-class MicroVideoVLDataset(Dataset):
+def data_partition(interaction_path):
     """
-    VLGraph용 Dataset — 우리 데이터 형식에 맞게 재작성
-    - 세션 = user_train 시퀀스 (최대 max_seq_len개)
-    - 노드 타입: item(1) / image(2) / title(3)
-    - 엣지 타입:
-        1: self-loop
-        2: out (item_i → item_i+1, 동일 모달리티 내 순방향)
-        3: in  (item_i+1 → item_i, 동일 모달리티 내 역방향)
-        4: bi-direction (양방향 동시 등장)
-        5: item → image  (inter-modality)
-        6: image → item  (inter-modality)
-        7: item → title  (inter-modality)
-        8: title → item  (inter-modality)
-        9: image → title (inter-modality)
-       10: title → image (inter-modality)
-    - leave-two-out: train / valid / test 분리
+    원본 data_partition() 대체 — interaction.parquet 로드
+    leave-two-out 분리 (원본과 동일한 구조 반환)
+
+    반환:
+        user_train : {user_id: [item_id, ...]}  1-based
+        user_valid : {user_id: [item_id]}
+        user_test  : {user_id: [item_id]}
+        usernum    : 유저 수
+        itemnum    : 아이템 수
     """
-    def __init__(self, interactions_df, image_feat, title_feat,
-                 max_seq_len=50, mode='train'):
-        self.max_seq_len = max_seq_len
-        self.mode = mode
-        # max_len: 노드 행렬 크기 (item + image + title 각 max_seq_len개)
-        self.max_node_len = max_seq_len * 3
+    df = pd.read_parquet(interaction_path)
+    df = df.sort_values(['user_id', 'timestamp'])
 
-        self.user_train      = {}
-        self.user_valid      = {}
-        self.user_test       = {}
-        self.train_item_dict = defaultdict(set)
+    # 1-based 변환 (원본과 동일)
+    df['user_id'] = df['user_id'] + 1
+    df['item_id'] = df['item_id'] + 1
 
-        interactions_df = interactions_df.sort_values(['user_id', 'timestamp'])
+    usernum = df['user_id'].max()
+    itemnum = df['item_id'].max()
 
-        # ── 유저별 시퀀스 구성 ────────────────────────────────────────────
-        user_sequences = defaultdict(list)
-        for _, row in interactions_df.iterrows():
-            u = int(row['user_id'])
-            i = int(row['item_id']) + 1  # 0은 padding 전용 → 1-based
-            user_sequences[u].append({
-                'item_id':   i,
-                'timestamp': float(row['timestamp']),
-            })
+    User = defaultdict(list)
+    for u, i in zip(df['user_id'], df['item_id']):
+        User[u].append(i)
 
-        # num_items: 실제 아이템 ID 최댓값 + 1 (= 1-based max)
-        # image/title 노드 offset에도 사용
-        self.num_items = interactions_df['item_id'].max() + 2
+    user_train = {}
+    user_valid = {}
+    user_test  = {}
 
-        # ── leave-two-out 분리 ────────────────────────────────────────────
-        for u, seq in user_sequences.items():
-            if len(seq) < 3:
-                self.user_train[u] = seq
-                self.user_valid[u] = []
-                self.user_test[u]  = []
-            else:
-                self.user_train[u] = seq[:-2]
-                self.user_valid[u] = [seq[-2]]
-                self.user_test[u]  = [seq[-1]]
+    for user in User:
+        nfeedback = len(User[user])
+        if nfeedback < 3:
+            user_train[user] = User[user]
+            user_valid[user] = []
+            user_test[user]  = []
+        else:
+            user_train[user] = User[user][:-2]
+            user_valid[user] = [User[user][-2]]
+            user_test[user]  = [User[user][-1]]
 
-            for s in self.user_train[u]:
-                self.train_item_dict[u].add(s['item_id'])
+    return user_train, user_valid, user_test, usernum, itemnum
 
-        # ── 아이템 피처 (1-based, 인덱스 0은 zero padding) ───────────────
-        # image_feat / title_feat: (num_items_raw, feat_dim), 0-based
-        # → 앞에 zero row 추가해서 1-based 인덱싱
-        pad_img   = np.zeros((1, image_feat.shape[1]), dtype=np.float32)
-        pad_title = np.zeros((1, title_feat.shape[1]), dtype=np.float32)
-        self.image_feat = np.concatenate([pad_img,   image_feat], axis=0)
-        self.title_feat = np.concatenate([pad_title, title_feat], axis=0)
 
-        # ── 학습 샘플 구성 ────────────────────────────────────────────────
-        self.samples = []
-        for u, train_seq in self.user_train.items():
-            if mode == 'train':
-                if len(train_seq) < 2:
-                    continue
-                target    = train_seq[-1]['item_id']
-                input_seq = train_seq[:-1]
-            elif mode == 'valid':
-                if not self.user_valid[u]:
-                    continue
-                target    = self.user_valid[u][0]['item_id']
-                input_seq = train_seq
-            else:  # test: train + valid를 컨텍스트로 (베이스라인 프로토콜)
-                if not self.user_test[u]:
-                    continue
-                target    = self.user_test[u][0]['item_id']
-                valid_seq = self.user_valid[u] if self.user_valid[u] else []
-                input_seq = train_seq + valid_seq
+def build_item_modality(item_path, title_feat, itemnum):
+    """
+    아이템별 image/title 노드 ID 매핑 구성
 
-            self.samples.append((u, input_seq, target))
+    원본 VLGraph에서 image_input[i] = [img_cluster_id, ...]  (K개)
+    우리는 아이템당 image 1개, title 1개 → [[img_node_id]], [[title_node_id]] 형태로 맞춤
+
+    image 노드 ID 공간: itemnum + item_id  (item과 겹치지 않게 offset)
+    title 노드 ID 공간: itemnum*2 + item_id
+    """
+    # item_id는 1-based (data_partition과 동일하게 맞춤)
+    item_to_image = {}  # {item_id(1-based): [img_node_id]}
+    item_to_title = {}  # {item_id(1-based): [title_node_id]}
+
+    item_df = pd.read_parquet(item_path)
+    for idx, row in item_df.iterrows():
+        item_id = int(row['item_id']) + 1  # 1-based
+        img_node_id   = itemnum + item_id   # image 노드 offset
+        title_node_id = itemnum * 2 + item_id  # title 노드 offset
+        item_to_image[item_id] = [img_node_id]
+        item_to_title[item_id] = [title_node_id]
+
+    return item_to_image, item_to_title
+
+
+class Data(Dataset):
+    """
+    원본 Data 클래스 구조 유지
+    변경점:
+    - inputs      : user_train 시퀀스 (세션 대체)
+    - image_inputs: 아이템별 image 노드 ID 리스트
+    - text_inputs : 아이템별 title 노드 ID 리스트
+    - targets     : 다음 아이템 ID (train: 마지막 아이템, valid/test: 해당 아이템)
+    """
+    def __init__(self, data, item_to_image, item_to_title, link_k, train_len=None):
+        # data = (inputs, image_inputs, text_inputs, targets)
+        # 원본과 동일한 구조
+        self.data_length = len(data[0])
+        self.inputs       = data[0]
+        self.image_inputs = data[1]
+        self.text_inputs  = data[2]
+        self.targets      = data[3]
+        self.inputs, self.max_len = self._handle_data(data[0], train_len)
+
+        self.k = link_k
+        self.item_to_image = item_to_image
+        self.item_to_title = item_to_title
+
+    def _handle_data(self, inputData, train_len=None):
+        """원본과 동일"""
+        len_data = [len(d) for d in inputData]
+        if train_len is None:
+            max_len = max(len_data)
+        else:
+            max_len = train_len
+
+        us_pois = []
+        for upois, le in zip(inputData, len_data):
+            _ = list(upois) if le < max_len else list(upois[:max_len])
+            us_pois.append(_)
+        return us_pois, max_len
 
     def __len__(self):
-        return len(self.samples)
+        return self.data_length
 
-    def _build_graph(self, item_ids):
+    def __getitem__(self, index):
         """
-        아이템 ID 시퀀스로부터 이종 그래프 인접 행렬 및 노드 정보 구성
-        - item 노드: item_id (1-based)
-        - image 노드: item_id + num_items (offset)
-        - title 노드: item_id + 2*num_items (offset)
+        원본 __getitem__과 동일한 그래프 구성 로직
+        u_input      : 아이템 ID 시퀀스
+        image_input  : [[img_node_id], [img_node_id], ...] (각 아이템당 1개)
+        text_input   : [[title_node_id], [title_node_id], ...] (각 아이템당 1개)
         """
-        le = len(item_ids)
+        u_input      = self.inputs[index]
+        image_input  = self.image_inputs[index]
+        text_input   = self.text_inputs[index]
+        target       = self.targets[index]
 
-        # 중복 제거 (순서 유지) — 같은 아이템이 여러 번 등장해도 노드는 1개
-        u_nodes = list(dict.fromkeys(item_ids))
-        i_nodes = [x + self.num_items     for x in u_nodes]  # image 노드
-        t_nodes = [x + 2 * self.num_items for x in u_nodes]  # title 노드
-        nodes_list = u_nodes + i_nodes + t_nodes
-        node_num   = len(nodes_list)
+        le = len(u_input)
 
-        # 노드 벡터 (padding 포함)
-        nodes = np.array(nodes_list + [0] * (self.max_node_len - node_num), dtype=np.int64)
+        # ── 노드 집합 구성 (원본과 동일) ─────────────────────────────────
+        u_nodes = np.unique(u_input).tolist()
+        i_nodes = np.unique([y for x in image_input for y in x]).tolist()
+        t_nodes = np.unique([y for x in text_input  for y in x]).tolist()
+        nodes   = u_nodes + i_nodes + t_nodes
+        nodes   = np.asarray(nodes + (self.max_len - len(nodes)) * [0])
 
-        # 노드 타입 마스크: item=1, image=2, title=3, pad=0
-        node_type_mask = (
-            [1] * len(u_nodes) +
-            [2] * len(i_nodes) +
-            [3] * len(t_nodes) +
-            [0] * (self.max_node_len - node_num)
-        )
+        u_node_num = len(u_nodes)
+        i_node_num = len(i_nodes)
+        t_node_num = len(t_nodes)
+        node_type_mask = [1]*u_node_num + [2]*i_node_num + [3]*t_node_num
+        node_type_mask = node_type_mask + (self.max_len - len(node_type_mask)) * [0]
 
-        # 노드 ID → 행렬 인덱스 매핑
-        node2idx = {n: idx for idx, n in enumerate(nodes_list)}
+        # ── 인접 행렬 구성 (원본과 동일) ─────────────────────────────────
+        adj = np.zeros((self.max_len, self.max_len))
 
-        # ── 인접 행렬 구성 ────────────────────────────────────────────────
-        adj = np.zeros((self.max_node_len, self.max_node_len), dtype=np.int32)
+        for i in np.arange(le):
+            item         = u_input[i]
+            item_idx     = np.where(nodes == item)[0][0]
+            adj[item_idx][item_idx] = 1  # self-loop
 
-        # inter-modality 엣지: item ↔ image, item ↔ title, image ↔ title
+            image_bundle = image_input[i]
+            for img in image_bundle:
+                img_idx = np.where(nodes == img)[0][0]
+                adj[img_idx][img_idx]   = 1
+                adj[item_idx][img_idx]  = 5
+                adj[img_idx][item_idx]  = 6
+
+            text_bundle = text_input[i]
+            for txt in text_bundle:
+                txt_idx = np.where(nodes == txt)[0][0]
+                adj[txt_idx][txt_idx]   = 1
+                adj[item_idx][txt_idx]  = 7
+                adj[txt_idx][item_idx]  = 8
+
+            for img in image_bundle:
+                for txt in text_bundle:
+                    img_idx = np.where(nodes == img)[0][0]
+                    txt_idx = np.where(nodes == txt)[0][0]
+                    adj[img_idx][txt_idx] = 9
+                    adj[txt_idx][img_idx] = 10
+
+        for i in np.arange(le - 1):
+            prev_item = u_input[i]
+            next_item = u_input[i + 1]
+            u = np.where(nodes == prev_item)[0][0]
+            v = np.where(nodes == next_item)[0][0]
+            if u == v or adj[u][v] == 4:
+                pass
+            elif adj[v][u] == 2:
+                adj[u][v] = 4
+                adj[v][u] = 4
+            else:
+                adj[u][v] = 2
+                adj[v][u] = 3
+
+            prev_image_bundle = image_input[i]
+            next_image_bundle = image_input[i + 1]
+            for prev_img in prev_image_bundle:
+                for next_img in next_image_bundle:
+                    u = np.where(nodes == prev_img)[0][0]
+                    v = np.where(nodes == next_img)[0][0]
+                    if u == v or adj[u][v] == 4:
+                        continue
+                    if adj[v][u] == 2:
+                        adj[u][v] = 4
+                        adj[v][u] = 4
+                    else:
+                        adj[u][v] = 2
+                        adj[v][u] = 3
+
+            prev_text_bundle = text_input[i]
+            next_text_bundle = text_input[i + 1]
+            for prev_txt in prev_text_bundle:
+                for next_txt in next_text_bundle:
+                    u = np.where(nodes == prev_txt)[0][0]
+                    v = np.where(nodes == next_txt)[0][0]
+                    if u == v or adj[u][v] == 4:
+                        continue
+                    if adj[v][u] == 2:
+                        adj[u][v] = 4
+                        adj[v][u] = 4
+                    else:
+                        adj[u][v] = 2
+                        adj[v][u] = 3
+
+        # ── alias 인덱스 (원본과 동일) ────────────────────────────────────
+        alias_inputs = []
+        for item in u_input:
+            item_idx = np.where(nodes == item)[0][0]
+            alias_inputs.append(item_idx)
+
+        alias_img_inputs = [[0] * self.k for _ in range(self.max_len)]
+        for i, img_bundle in enumerate(image_input):
+            for j, img in enumerate(img_bundle):
+                img_idx = np.where(nodes == img)[0][0]
+                alias_img_inputs[i][j] = img_idx
+
+        alias_txt_inputs = [[0] * self.k for _ in range(self.max_len)]
+        for i, txt_bundle in enumerate(text_input):
+            for j, txt in enumerate(txt_bundle):
+                txt_idx = np.where(nodes == txt)[0][0]
+                alias_txt_inputs[i][j] = txt_idx
+
+        alias_inputs = alias_inputs + [0] * (self.max_len - le)
+        u_input      = u_input      + [0] * (self.max_len - le)
+        us_msks      = [1] * le + [0] * (self.max_len - le) if le < self.max_len else [1] * self.max_len
+
+        # ── node_pos_matrix (원본과 동일) ─────────────────────────────────
+        node_pos_matrix = np.zeros((self.max_len, self.max_len))
+        n_idx = 0
         for item in u_nodes:
-            item_idx = node2idx[item]
-            img_idx  = node2idx[item + self.num_items]
-            txt_idx  = node2idx[item + 2 * self.num_items]
+            pos_idx = [p for p, x in enumerate(u_input) if item == x]
+            node_pos_matrix[n_idx][pos_idx] = 1
+            n_idx += 1
+        for image in i_nodes:
+            pos_idx = [p for p, sublist in enumerate(image_input) if image in sublist]
+            node_pos_matrix[n_idx][pos_idx] = 1
+            n_idx += 1
+        for text in t_nodes:
+            pos_idx = [p for p, sublist in enumerate(text_input) if text in sublist]
+            node_pos_matrix[n_idx][pos_idx] = 1
+            n_idx += 1
 
-            # self-loop
-            adj[item_idx][item_idx] = 1
-            adj[img_idx][img_idx]   = 1
-            adj[txt_idx][txt_idx]   = 1
-
-            # item ↔ image
-            adj[item_idx][img_idx] = 5
-            adj[img_idx][item_idx] = 6
-
-            # item ↔ title
-            adj[item_idx][txt_idx] = 7
-            adj[txt_idx][item_idx] = 8
-
-            # image ↔ title
-            adj[img_idx][txt_idx] = 9
-            adj[txt_idx][img_idx] = 10
-
-        # intra-modality 순차 엣지: 연속 아이템 쌍 (item/image/title 각각)
-        for pos in range(le - 1):
-            prev_item = item_ids[pos]
-            next_item = item_ids[pos + 1]
-
-            for offset in [0, self.num_items, 2 * self.num_items]:
-                u = node2idx[prev_item + offset]
-                v = node2idx[next_item + offset]
-                if u == v or adj[u][v] == 4:
-                    continue
-                if adj[v][u] == 2:  # 이미 역방향 존재 → bi-direction
-                    adj[u][v] = 4
-                    adj[v][u] = 4
-                else:
-                    adj[u][v] = 2  # out
-                    adj[v][u] = 3  # in
-
-        # ── alias 인덱스 (시퀀스 위치 → 노드 행렬 인덱스) ─────────────────
-        alias_inputs = [node2idx[item] for item in item_ids]
-        alias_inputs = alias_inputs + [0] * (self.max_seq_len - le)
-
-        # ── node_pos_matrix: 각 노드가 시퀀스 어느 위치에 등장했는지 ───────
-        u_input_padded = item_ids + [0] * (self.max_seq_len - le)
-        node_pos_matrix = np.zeros((self.max_node_len, self.max_seq_len), dtype=np.float32)
-        for n_idx, item in enumerate(u_nodes):
-            pos_idx = [p for p, x in enumerate(u_input_padded) if x == item]
-            node_pos_matrix[n_idx, pos_idx] = 1.0
-
-        # item seq mask
-        us_msks = [1] * le + [0] * (self.max_seq_len - le)
-
-        return adj, nodes, node_type_mask, node_pos_matrix, alias_inputs, us_msks
-
-    def __getitem__(self, idx):
-        u, seq, target = self.samples[idx]
-
-        # max_seq_len으로 truncate (최근 시퀀스 유지)
-        seq      = seq[-self.max_seq_len:]
-        item_ids = [s['item_id'] for s in seq]
-
-        adj, nodes, node_type_mask, node_pos_matrix, alias_inputs, us_msks = \
-            self._build_graph(item_ids)
-
-        # negative 샘플링
-        rated = self.train_item_dict[u] | {target}
-        neg = np.random.randint(1, self.num_items)
-        while neg in rated:
-            neg = np.random.randint(1, self.num_items)
-
-        return {
-            'adj':             torch.tensor(adj,             dtype=torch.long),
-            'nodes':           torch.tensor(nodes,           dtype=torch.long),
-            'node_type_mask':  torch.tensor(node_type_mask,  dtype=torch.long),
-            'node_pos_matrix': torch.tensor(node_pos_matrix, dtype=torch.float),
-            'alias_inputs':    torch.tensor(alias_inputs,    dtype=torch.long),
-            'us_msks':         torch.tensor(us_msks,         dtype=torch.long),
-            'target':          torch.tensor(target,          dtype=torch.long),
-            'negative':        torch.tensor(neg,             dtype=torch.long),
-            'user_id':         torch.tensor(u,               dtype=torch.long),
-        }
+        return [torch.tensor(adj),             torch.tensor(nodes),
+                torch.tensor(node_type_mask),  torch.tensor(node_pos_matrix),
+                torch.tensor(us_msks),         torch.tensor(target),
+                torch.tensor(u_input),         torch.tensor(alias_inputs),
+                torch.tensor(alias_img_inputs),torch.tensor(alias_txt_inputs)]
