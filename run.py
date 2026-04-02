@@ -1,6 +1,4 @@
-import sys
 import warnings
-import torch
 warnings.filterwarnings('ignore')
 
 from main_fluid import train
