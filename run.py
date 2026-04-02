@@ -55,7 +55,6 @@ if __name__ == '__main__':
         },
 
         # ── 학습 파라미터 (원본 config.yaml과 동일) ───────────────────────
-        'seed':                42,
         'epochs':             100,
         'batch_size':         128,
         'num_workers':          3,
