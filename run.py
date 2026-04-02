@@ -64,7 +64,7 @@ def main():
     }
 
     config = Config(
-        model=Fliud_MMRec,
+        model=Fluid_MMRec,
         dataset=parameter_dict['dataset'],
         config_file_list=parameter_dict['config_file_list']
     )
@@ -92,7 +92,7 @@ def main():
 
     # ── 모델 초기화 ──────────────────────────────────────────────────────
     init_seed(config['seed'], config['reproducibility'])
-    model = Fliud_MMRec(
+    model = Fluid_MMRec(
         config,
         train_data.dataset,
         image_feat=image_feat,
