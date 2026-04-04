@@ -1,73 +1,39 @@
+"""
+FindRec - Baseline Runner
+베이스라인 조건에 맞춘 실행 스크립트
+"""
+
 import warnings
 warnings.filterwarnings('ignore')
 
+import yaml
 from main_fluid import train
 
+
+def load_config(config_path='config.yaml'):
+    """Load config from YAML file"""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
+
+
 if __name__ == '__main__':
-    config = {
-        # ── 데이터 경로 ───────────────────────────────────────────────────
-        'interaction_path': './interaction.parquet',
-        'item_path':        './item_used.parquet',
-        'title_npy_path':   './title_emb.npy',
-        'save_path':        './best_fluid.pt',
-
-        # ── 모델 구조 (원본 config.yaml과 동일) ───────────────────────────
-        'id_embedding_dim':     128,
-        'num_attention_heads':    8,
-        'dropout_prob':         0.2,
-        'bottleneck': {
-            'dim':                256,
-            'beta':               1.0,
-            'weight':             0.1,
-            'kernel_type':       'rbf',
-            'bandwidth_factor':   1.0,
-            'adaptive_bandwidth': True,
-            'min_bandwidth':      0.1,
-            'max_bandwidth':     10.0,
-        },
-        'mamba': {
-            'd_state':    16,
-            'd_conv':      4,
-            'expand':      2,
-            'norm_eps':  1e-5,
-            'hidden_dim': 128,
-            'num_layers':   2,
-        },
-        'multimodal': {
-            'hidden_size':        256,
-            'projection_dropout': 0.2,
-            'fusion_dropout':     0.2,
-        },
-        'expert': {
-            'num_experts': 4,
-        },
-        'router': {
-            'hidden_size': 256,
-            'dropout':     0.1,
-        },
-        'image': {
-            'feature_dim':    None,  # load_data에서 자동 설정
-            'projection_dim': 256,
-        },
-        'text': {
-            'feature_dim':    None,  # load_data에서 자동 설정
-            'projection_dim': 256,
-        },
-
-        # ── 학습 파라미터 (원본 config.yaml과 동일) ───────────────────────
-        'epochs':             100,
-        'batch_size':         128,
-        'num_workers':          3,
-        'learning_rate':     0.001,
-        'weight_decay':       0.01,
-        'gradient_clip_norm':  2.0,
-        'eval_step':            1,
-        'stopping_step':        5,
-        'max_seq_len':         50,
-
-        # ── 평가 (베이스라인과 동일) ──────────────────────────────────────
-        'topk':    10,   # NDCG@10, HR@10, MRR
-        'num_neg': 100,  # 101개 후보 (정답 1 + negative 100)
-    }
-
+    # Load config
+    config = load_config('config.yaml')
+    
+    print("=" * 70)
+    print("FindRec Training")
+    print("=" * 70)
+    print(f"Device: {config['device']}")
+    print(f"Seed: {config['seed']}")
+    print(f"Hidden dim: {config['id_embedding_dim']}")
+    print(f"Num heads: {config['num_attention_heads']}")
+    print(f"Dropout: {config['dropout_prob']}")
+    print(f"Batch size: {config['batch_size']}")
+    print(f"Learning rate: {config['learning_rate']}")
+    print(f"Max seq len: {config['max_seq_len']}")
+    print(f"Eval: {config['topk']}-candidate (1 + {config['num_neg']} neg)")
+    print("=" * 70)
+    
+    # Train
     train(config)
