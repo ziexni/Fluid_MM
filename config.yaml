@@ -62,9 +62,14 @@ text:
     feature_dim: null          # auto-detected from data (384)
     projection_dim: 256
 
+# ── Data & Model Config ───────────────────────────────────────────────────────
+# Auto-detected in main_fluid.py:
+# - image.feature_dim (from data)
+# - text.feature_dim (from data)
+
 # ── Training ──────────────────────────────────────────────────────────────────
 epochs: 100
-batch_size: 256                # TedRec과 유사
+batch_size: 128                # main_fluid.py expects 'batch_size'
 num_workers: 0                 # Kaggle/Windows 호환
 learning_rate: 0.001           # TedRec과 동일
 weight_decay: 0.01
